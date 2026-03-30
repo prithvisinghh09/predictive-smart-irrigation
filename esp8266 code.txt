@@ -1,0 +1,180 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h> 
+#include <ArduinoJson.h>
+#include <Firebase_ESP_Client.h> 
+#include <time.h>
+
+// Provide the token generation process info.
+#include "addons/TokenHelper.h"
+// Provide the RTDB payload printing info and other helper functions.
+#include "addons/RTDBHelper.h"
+
+// ================= CONFIGURATION =================
+
+// 1. Wi-Fi Credentials
+#define WIFI_SSID "D"
+#define WIFI_PASSWORD "J"
+
+// 2. WeatherAPI Settings
+String weatherApiKey = "null"; 
+String city = "Indore";
+String weatherUrl = "null";
+
+// 3. Firebase Settings
+#define API_KEY "null" 
+#define DATABASE_URL "null" 
+
+// 4. Hardware Settings
+const int soilSensorPin = A0; 
+
+// 5. Timing Settings (15 Minutes)
+unsigned long previousMillis = 0;
+const unsigned long interval = 15 * 60 * 1000; 
+
+// ================= GLOBAL VARIABLES =================
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// Variables to hold our clean data
+float currentTemp = 0.0;
+float currentHumidity = 0.0;
+String weatherDescription = "";
+int soilMoisturePercent = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  
+  // Connect to Wi-Fi
+  Serial.print("Connecting to Wi-Fi");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println("\nConnected to Wi-Fi!");
+
+  // Configure Time (NTP) for IST (UTC + 5:30)
+  configTime(19800, 0, "pool.ntp.org", "time.nist.gov");
+  Serial.print("Waiting for NTP time sync: ");
+  time_t now = time(nullptr);
+  while (now < 8 * 3600 * 2) {
+    delay(500);
+    Serial.print(".");
+    now = time(nullptr);
+  }
+  Serial.println("\nTime synced successfully!");
+
+  // Configure Firebase
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+  
+  // Sign in anonymously
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Firebase Auth Successful");
+  } else {
+    Serial.printf("Firebase Error: %s\n", config.signer.signupError.message.c_str());
+  }
+
+  config.token_status_callback = tokenStatusCallback;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // Run immediately on boot, then every 15 minutes
+  if (currentMillis - previousMillis >= interval || previousMillis == 0) {
+    previousMillis = currentMillis;
+
+    Serial.println("\n--- Starting 15-Minute Data Routine ---");
+
+    readSoilSensor();
+    fetchWeatherData();
+    sendDataToFirebase();
+  }
+}
+
+// ================= HELPER FUNCTIONS =================
+
+void readSoilSensor() {
+  int rawValue = analogRead(soilSensorPin);
+  
+  // Map raw analog value (0-1023) to a percentage (0-100%)
+  soilMoisturePercent = map(rawValue, 1023, 400, 0, 100); 
+  soilMoisturePercent = constrain(soilMoisturePercent, 0, 100);
+  
+  Serial.printf("Soil Moisture: %d%%\n", soilMoisturePercent);
+}
+
+void fetchWeatherData() {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClient client; 
+    HTTPClient http;
+    
+    http.begin(client, weatherUrl);
+    int httpCode = http.GET();
+    
+    if (httpCode == 200) {
+      // FIX: Download the entire response as a string first to prevent chunked data errors
+      String payload = http.getString();
+      
+      DynamicJsonDocument doc(2048);
+      DeserializationError error = deserializeJson(doc, payload);
+      
+      if (!error) {
+        currentTemp = doc["current"]["temp_c"];
+        currentHumidity = doc["current"]["humidity"];
+        weatherDescription = doc["current"]["condition"]["text"].as<String>();
+        
+        Serial.printf("Weather Fetched: %.1f C, %.1f%% Hum, %s\n", currentTemp, currentHumidity, weatherDescription.c_str());
+      } else {
+        Serial.print("JSON Parse failed: ");
+        Serial.println(error.c_str());
+        Serial.println("Raw Data received: " + payload);
+      }
+    } else if (httpCode > 0) {
+      Serial.printf("API Request Failed! HTTP Code: %d\n", httpCode);
+      String errorPayload = http.getString();
+      Serial.println("WeatherAPI says: " + errorPayload);
+    } else {
+      Serial.printf("Error on HTTP request: %s\n", http.errorToString(httpCode).c_str());
+    }
+    http.end();
+  }
+}
+
+String getTimestamp() {
+  time_t now = time(nullptr);
+  struct tm timeinfo;
+  gmtime_r(&now, &timeinfo);
+  
+  char timeStringBuff[50];
+  strftime(timeStringBuff, sizeof(timeStringBuff), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return String(timeStringBuff);
+}
+
+void sendDataToFirebase() {
+  if (Firebase.ready()) {
+    String timestamp = getTimestamp();
+    
+    FirebaseJson json;
+    json.set("timestamp_ist", timestamp);
+    json.set("location", city);
+    json.set("soil_data/moisture_percentage", soilMoisturePercent);
+    json.set("weather_data/temperature_celsius", currentTemp); 
+    json.set("weather_data/humidity_percentage", currentHumidity);
+    json.set("weather_data/condition", weatherDescription);
+
+    Serial.print("Pushing to Firebase... ");
+    if (Firebase.RTDB.pushJSON(&fbdo, "/sensor_logs", &json)) {
+      Serial.println("SUCCESS!");
+    } else {
+      Serial.println("FAILED!");
+      Serial.println("REASON: " + fbdo.errorReason());
+    }
+  }
+}
