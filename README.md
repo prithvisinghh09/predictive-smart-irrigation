@@ -18,5 +18,5 @@ This project implements a full edge-to-cloud data pipeline:
 ## How it Works
 1. The ESP8266 pushes telemetry to Firebase.
 2. The `cloud_ai.py` script wakes up hourly, extracts the dataset, and aligns current weather variables with future moisture states (shifted by 24 intervals).
-3. The model outputs a 6-hour forecast and pushes the prediction back to a dedicated Firebase node.
+3. The model outputs a 1-hour forecast and pushes the prediction back to a dedicated Firebase node.
 4. The web dashboard listens for state changes and updates the UI in real-time.
